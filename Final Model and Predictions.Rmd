@@ -1,0 +1,187 @@
+ ---
+title: "Farmers"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy=TRUE)
+```
+
+```{r}
+library(ROCR)
+library(plyr)
+library(car)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(NbClust)
+library(tree)
+library(maptree)
+library(class)
+library(MASS)
+library(randomForest)
+library(DMwR)
+library(tidyr)
+library(caret)
+library(ModelMetrics)
+library(ROSE)
+
+
+data <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Build.csv",header = T)
+#data <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Build.csv",header = T, na.strings = c("", "NA"))
+data.predict <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Submit.csv",header = T)
+submit <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Example Submission.csv",header = T)
+```
+
+```{r}
+data2 <- mutate_all(data, .funs=toupper) #Make sure all categorical data is consistant
+data2 <- as.data.frame(lapply(data2, as.factor))
+nlevels <- as.data.frame(lapply(data2, nlevels))
+data2 <- data2[, which(nlevels != 1)]
+data2 <- data2[-2]
+data2 <- as.data.frame(lapply(data2, as.factor))
+
+data2$Medical.Coverage.Amount            <- as.numeric(data$Medical.Coverage.Amount)
+data2$Liability.Coverage.Amount          <- as.numeric(data$Liability.Coverage.Amount)
+data2$Content.Coverage.Amount            <- as.numeric(data$Content.Coverage.Amount)
+data2$Dwelling.Coverage.Amount           <- as.numeric(data$Dwelling.Coverage.Amount)
+data2$Loss.of.Use.Coverage.Amount        <- as.numeric(data$Loss.of.Use.Coverage.Amount)
+data2$Separate.Structure.Coverage.Amount <- as.numeric(data$Separate.Structure.Coverage.Amount)
+data2$Policyholder.Age                   <- as.numeric(data$Policyholder.Age)
+
+
+
+data2$CRN.Proximate.Cause <- mapvalues(data2$CRN.Proximate.Cause, from = c("NULL"), to= c(""))
+
+data2$Cause.of.Loss <- mapvalues(data2$Cause.of.Loss, from = c("", "FIRE", "MOBILE HOME FLOOD", "WATER PLUMBING", "THEFT", "WATER WEATHER", "EARTH MOVEMENT"), to= c("OTHER", "FIRE - UNKNOWN SOURCE", "WATER", "WATER", "BURGLARY, THEFT OR ROBBERY", "WATER" , "EARTHQUAKE")) #gooooood
+
+data2$Roof.Type <- mapvalues(data2$Roof.Type, from = c("VICTORIAN SCALLOPED SHAKE", "OTHER"), to= c("WOOD SHINGLE/SHAKE", ""))
+
+data2$Policyholder.Age <- as.numeric(mapvalues(data2$Policyholder.Age, from = c(as.character(seq(-141,17,by = 1))), to= c(rep(NA, 159))))
+
+data2$Medical.Coverage.Amount[is.na(data2$Medical.Coverage.Amount)] <- mean(data2$Medical.Coverage.Amount, na.rm=T)
+data2$Liability.Coverage.Amount[is.na(data2$Liability.Coverage.Amount)] <- median(data2$Liability.Coverage.Amount, na.rm=T)
+data2$Policyholder.Age[is.na(data2$Policyholder.Age)] <- median(data2$Policyholder.Age, na.rm=T)
+data2$Content.Coverage.Amount[is.na(data2$Content.Coverage.Amount)] <- median(data2$Content.Coverage.Amount, na.rm=T)
+data2$Dwelling.Coverage.Amount[is.na(data2$Dwelling.Coverage.Amount)] <- median(data2$Dwelling.Coverage.Amount, na.rm=T)
+data2$Loss.of.Use.Coverage.Amount[is.na(data2$Loss.of.Use.Coverage.Amount)] <- median(data2$Loss.of.Use.Coverage.Amount, na.rm=T)
+data2$Separate.Structure.Coverage.Amount[is.na(data2$Separate.Structure.Coverage.Amount)] <- median(data2$Separate.Structure.Coverage.Amount, na.rm=T)
+
+nlevels <- as.data.frame(lapply(data2, nlevels))
+data2 <- data2[, which(nlevels <= 200)]
+
+```
+
+XGBtree is our final model. Making model and predicting new data. 
+```{r}
+
+predict2 <-  data.predict
+predict2 <- mutate_all(predict2, .funs=toupper)
+predict2 <- as.data.frame(lapply(predict2, as.factor))
+nlevels <- as.data.frame(lapply(predict2, nlevels))
+predict2 <- predict2[, which(nlevels != 1)]
+predict2 <- predict2[-1]
+predict2 <- as.data.frame(lapply(predict2, as.factor))
+
+
+predict2$Medical.Coverage.Amount            <- as.numeric(data.predict$Medical.Coverage.Amount)
+predict2$Liability.Coverage.Amount          <- as.numeric(data.predict$Liability.Coverage.Amount)
+predict2$Content.Coverage.Amount            <- as.numeric(data.predict$Content.Coverage.Amount)
+predict2$Dwelling.Coverage.Amount           <- as.numeric(data.predict$Dwelling.Coverage.Amount)
+predict2$Loss.of.Use.Coverage.Amount        <- as.numeric(data.predict$Loss.of.Use.Coverage.Amount)
+predict2$Separate.Structure.Coverage.Amount <- as.numeric(data.predict$Separate.Structure.Coverage.Amount)
+predict2$Policyholder.Age                   <- as.numeric(data.predict$Policyholder.Age)
+
+
+
+predict2$CRN.Proximate.Cause <- mapvalues(predict2$CRN.Proximate.Cause, from = c("NULL"), to= c(""))
+
+
+predict2$Cause.of.Loss <- mapvalues(predict2$Cause.of.Loss, from = c("", "FIRE", "MOBILE HOME FLOOD", "WATER PLUMBING", "THEFT", "WATER WEATHER", "EARTH MOVEMENT"), to= c("OTHER", "FIRE - UNKNOWN SOURCE", "WATER", "WATER", "BURGLARY, THEFT OR ROBBERY", "WATER" , "EARTHQUAKE")) #gooooood
+
+
+predict2$Roof.Type <- mapvalues(predict2$Roof.Type, from = c("VICTORIAN SCALLOPED SHAKE", "OTHER"), to= c("WOOD SHINGLE/SHAKE", ""))
+
+
+predict2$Policyholder.Age <- as.numeric(mapvalues(predict2$Policyholder.Age, from = c(as.character(seq(-141,17,by = 1))), to= c(rep(NA, 159))))
+
+
+predict2$Medical.Coverage.Amount[is.na(predict2$Medical.Coverage.Amount)] <- mean(predict2$Medical.Coverage.Amount, na.rm=T)
+predict2$Liability.Coverage.Amount[is.na(predict2$Liability.Coverage.Amount)] <- median(predict2$Liability.Coverage.Amount, na.rm=T)
+predict2$Policyholder.Age[is.na(predict2$Policyholder.Age)] <- median(predict2$Policyholder.Age, na.rm=T)
+predict2$Content.Coverage.Amount[is.na(predict2$Content.Coverage.Amount)] <- median(predict2$Content.Coverage.Amount, na.rm=T)
+predict2$Dwelling.Coverage.Amount[is.na(predict2$Dwelling.Coverage.Amount)] <- median(predict2$Dwelling.Coverage.Amount, na.rm=T)
+predict2$Loss.of.Use.Coverage.Amount[is.na(predict2$Loss.of.Use.Coverage.Amount)] <- median(predict2$Loss.of.Use.Coverage.Amount, na.rm=T)
+predict2$Separate.Structure.Coverage.Amount[is.na(predict2$Separate.Structure.Coverage.Amount)] <- median(predict2$Separate.Structure.Coverage.Amount, na.rm=T)
+
+nlevels <- as.data.frame(lapply(predict2, nlevels))
+
+predict2 <- predict2[, which(nlevels <= 200)]
+
+
+load("vars.rda")
+makingdummy <- rbind(data2[-1] , predict2)
+
+dummys <- dummyVars("~.", data = makingdummy , fullRank = T)
+makingdummy1 <- as.data.frame(predict(dummys, makingdummy))
+names(makingdummy1) <- make.names(names(makingdummy1), unique=TRUE)
+
+data3 <- makingdummy1[ 1:nrow(data2),]
+data3 <- cbind(Subrogation.Outcome = data2$Subrogation.Outcome, data3)
+predict3 <- makingdummy1[-c(1:nrow(data2)),]
+
+str(predict3)
+
+```
+
+
+
+
+
+
+
+```{r}
+set.seed(21)
+data3$Subrogation.Outcome <- as.factor(ifelse(data3$Subrogation.Outcome == 1 , 'yes' , 'no'))
+set.seed(21)
+data3.bal <- SMOTE(Subrogation.Outcome ~ ., data3, perc.over = 100, perc.under = 600)
+prop.table(table(data3.bal$Subrogation.Outcome))
+
+
+control <- trainControl(method = 'cv', number = 10, returnResamp = 'none', summaryFunction = twoClassSummary, classProbs = TRUE)
+
+
+indSub
+
+set.seed(21)
+Model <-  train(data3.bal[,-1], # factor()
+                data3.bal[,1],   # numeric only
+                method ="xgbTree",
+                trControl = control,
+                metric = "ROC",
+                preProc = c("center", "scale"))
+
+Final.Model <- Model
+
+
+prob_glm  <- predict(Model, newdata=predict3 , type = "prob")
+
+save(Final.Model, file = "FinalModel10.rda")
+
+
+```
+
+```{r}
+write.csv(tst.data, "test.csv", row.names = F)
+
+varImp(Final.Model)
+```
+
+
+# write predictions
+```{r}
+prob_glm$no <- NULL 
+
+predictionsTable <- cbind("Fake Claim Number" = data.predict$Fake.Claim.Number, "Prediction" = prob_glm$yes)
+
+write.csv(file ="Databoi.csv", x = predictionsTable, row.names = F)
+```

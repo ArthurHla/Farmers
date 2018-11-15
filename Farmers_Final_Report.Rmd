@@ -1,0 +1,806 @@
+ ---
+title: "Farmers"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy=TRUE)
+```
+
+```{r}
+library(ROCR)
+library(plyr)
+library(car)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(NbClust)
+library(tree)
+library(maptree)
+library(class)
+library(MASS)
+library(randomForest)
+library(DMwR)
+library(tidyr)
+library(caret)
+library(ModelMetrics)
+library(ROSE)
+
+
+data <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Build.csv",header = T)
+#data <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Build.csv",header = T, na.strings = c("", "NA"))
+data.predict <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Submit.csv",header = T)
+submit <- read.csv("C:/Users/arthu/Desktop/DS/Farmers/Example Submission.csv",header = T)
+```
+
+
+# General Check
+```{r}
+str(data)
+table(duplicated(data)) #checked for duplicated data
+colSums(is.na(data)) # all the na values for each variable
+head(data)
+names(data)
+num <- as.numeric(which(sapply(data, is.numeric) == T))  #all numeric data
+cat <- data[c(as.numeric(which(sapply(data, is.numeric) == F)))] #all categorical data
+
+str(data)
+
+var.data <- as.data.frame(rbind(MAD = data %>% summarise_at(vars(num), mad, na.rm = TRUE),
+Mean = data %>% summarise_at(vars(num), mean, na.rm = TRUE), Median = data %>% summarise_at(vars(num), median, na.rm = TRUE), SD = data %>% summarise_at(vars(num), sd, na.rm = TRUE)))
+```
+
+# Data Cleaning
+```{r}
+data2 <- mutate_all(data, .funs=toupper) #Make sure all categorical data is consistant
+data2 <- as.data.frame(lapply(data2, as.factor))
+nlevels <- as.data.frame(lapply(data2, nlevels))
+data2 <- data2[, which(nlevels != 1)]
+data2 <- data2[-2]
+data2 <- as.data.frame(lapply(data2, as.factor))
+
+data2$Medical.Coverage.Amount            <- as.numeric(data$Medical.Coverage.Amount)
+data2$Liability.Coverage.Amount          <- as.numeric(data$Liability.Coverage.Amount)
+data2$Content.Coverage.Amount            <- as.numeric(data$Content.Coverage.Amount)
+data2$Dwelling.Coverage.Amount           <- as.numeric(data$Dwelling.Coverage.Amount)
+data2$Loss.of.Use.Coverage.Amount        <- as.numeric(data$Loss.of.Use.Coverage.Amount)
+data2$Separate.Structure.Coverage.Amount <- as.numeric(data$Separate.Structure.Coverage.Amount)
+data2$Policyholder.Age                   <- as.numeric(data$Policyholder.Age)
+
+nlevels <- as.data.frame(lapply(data2, nlevels))
+names(data2[, which(nlevels > 2)])
+
+# [1] "Policy.Description"         "CRN.Proximate.Cause"        "Loss.Location.State"        "Loss.Location.Zip.Code.5"  
+#  [5] "Cause.of.Loss"              "Date.of.Loss"               "Claim.Reported.Date"        "Water.Damage.Source"       
+#  [9] "Property.Content"           "Claim.Created.Date"         "Policy.Inception.Date"      "Policy.Start.Date"         
+# [13] "Product.Type.Code"          "Product.Type"               "Construction.Material.Code" "Construction.Year"         
+# [17] "Roof.Year"                  "Roof.Type.Code"             "Roof.Type" 
+
+
+
+data2$CRN.Proximate.Cause <- mapvalues(data2$CRN.Proximate.Cause, from = c("NULL"), to= c(""))
+
+
+data2$Cause.of.Loss <- mapvalues(data2$Cause.of.Loss, from = c("", "FIRE", "MOBILE HOME FLOOD", "WATER PLUMBING", "THEFT", "WATER WEATHER", "EARTH MOVEMENT"), to= c("OTHER", "FIRE - UNKNOWN SOURCE", "WATER", "WATER", "BURGLARY, THEFT OR ROBBERY", "WATER" , "EARTHQUAKE")) #gooooood
+
+
+#data2$Water.Damage.Source <- mapvalues(data2$Water.Damage.Source, from = "OTHER", to= "UNKNOWN") 
+
+#data2$Property.Content <- mapvalues(data2$Property.Content, from = c("OTHER PERSONAL PROPERTY", "GRILL/PATIO FURNITURE/HOT TUB", "JEWELRY AND WATCHES", "STERLING SILVER", "RECORD,TAPE PLAYERS,RADIO & TV", "NONE"), to= c("OTHER", "FURNITURE", "JEWELRY", "JEWELRY", "MEDIA/ELECTRONICS", ""))
+
+
+# data2$Construction.Year <- addNA(data2$Construction.Year)
+# data2$Construction.Year <- mapvalues(data2$Construction.Year, from = c("1190", "1200", "1559" , "1570", NA), to= c(rep("<1650",4), "UNKOWN"))
+# 
+# 
+# data2$Roof.Year <- addNA(data2$Roof.Year)
+# data2$Roof.Year <- mapvalues(data2$Roof.Year, from = c("0", NA), to= c("UNKOWN", "UNKOWN"))
+
+data2$Roof.Type <- mapvalues(data2$Roof.Type, from = c("VICTORIAN SCALLOPED SHAKE", "OTHER"), to= c("WOOD SHINGLE/SHAKE", ""))
+
+
+data2$Policyholder.Age <- as.numeric(mapvalues(data2$Policyholder.Age, from = c(as.character(seq(-141,17,by = 1))), to= c(rep(NA, 159))))
+```
+
+# Correlation Table
+```{r}
+test <- as.data.frame(lapply(data2,as.numeric))
+test <- as.matrix(cor(na.omit(test)))
+test_melt <- arrange(melt(test), -abs(value))
+#change correlation value to liking
+cor_test <- filter(test_melt, value>.70 & value!=1)
+
+cor_test[!duplicated(cor_test$value), ]
+
+data2$Claim.Reported.Date <-  NULL
+data2$Policy.Description <- NULL
+data2$Content.Coverage.Amount <- NULL
+data2$Separate.Structure.Coverage.Amount <-  NULL
+data2$Loss.of.Use.Coverage.Amount	<-  NULL
+
+data2$Building.Unit.Indicator		<-  NULL
+data2$MED.PIP.Unit.Indicator		<-  NULL
+data2$Property.Content			<-  NULL
+
+```
+
+# Test/Training sets:
+```{R}
+data2$Medical.Coverage.Amount[is.na(data2$Medical.Coverage.Amount)] <- mean(data2$Medical.Coverage.Amount, na.rm=T)
+data2$Liability.Coverage.Amount[is.na(data2$Liability.Coverage.Amount)] <- median(data2$Liability.Coverage.Amount, na.rm=T)
+data2$Policyholder.Age[is.na(data2$Policyholder.Age)] <- median(data2$Policyholder.Age, na.rm=T)
+data2$Content.Coverage.Amount[is.na(data2$Content.Coverage.Amount)] <- median(data2$Content.Coverage.Amount, na.rm=T)
+data2$Dwelling.Coverage.Amount[is.na(data2$Dwelling.Coverage.Amount)] <- median(data2$Dwelling.Coverage.Amount, na.rm=T)
+data2$Loss.of.Use.Coverage.Amount[is.na(data2$Loss.of.Use.Coverage.Amount)] <- median(data2$Loss.of.Use.Coverage.Amount, na.rm=T)
+data2$Separate.Structure.Coverage.Amount[is.na(data2$Separate.Structure.Coverage.Amount)] <- median(data2$Separate.Structure.Coverage.Amount, na.rm=T)
+
+
+
+nlevels <- as.data.frame(lapply(data2, nlevels))
+data.num <- data2[, which(nlevels <= 300)]
+
+# data2[, which(nlevels > 100)]
+
+
+dummys <- dummyVars("~.", data = data.num , fullRank = T)
+data.num <- as.data.frame(predict(dummys, data.num))
+
+
+set.seed(21) 
+n = nrow(data.num)
+ind= sample.int(n, 0.8*n) 
+trn.data = data.num[ ind,]
+tst.data = data.num[-ind,]
+```
+
+
+# Modeling:
+```{r}
+
+set.seed(21) 
+nfold = 10
+folds = sample(cut(1:nrow(trn.data), breaks=nfold, labels=FALSE))
+
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+
+records = matrix(NA, nrow=6, ncol=3)
+colnames(records) = c("train.error","test.error", "AUC")
+rownames(records) = c("tree","knn","lda","glm","qda", "random forest")
+
+```
+
+
+## tree :
+```{r}
+trn.data$Subrogation.Outcome <- as.factor(ifelse(trn.data$Subrogation.Outcome == 1 , 'yes' , 'no'))
+tst.data$Subrogation.Outcome <- as.factor(ifelse(tst.data$Subrogation.Outcome == 1 , 'yes' , 'no'))
+set.seed(21)
+trn.data_bal <- SMOTE(Subrogation.Outcome ~ ., trn.data, perc.over = 100, perc.under = 600)
+prop.table(table(trn.data_bal$Subrogation.Outcome))
+
+
+# omiting NA = more test error
+trn.data.num.tree <- rpart(Subrogation.Outcome ~ . , data = trn.data_bal, method= "class", control = tree.control(nrow(trn.data_bal), minsize = 10, mindev =.001))
+
+summary(trn.data.num.tree)
+
+Predict.tree.train <- predict(trn.data.num.tree, trn.data_bal, type = "class")
+Predict.tree.test <- predict(trn.data.num.tree, tst.data, type = "class")
+
+records[1,1] <- calc_error_rate(Predict.tree.train, trn.data$Subrogation.Outcome)
+records[1,2] <- calc_error_rate(Predict.tree.test, tst.data$Subrogation.Outcome)
+
+
+prob_tree <- predict(trn.data.num.tree, tst.data, type="vector")
+pred_tree <- prediction(prob_tree, tst.data$Subrogation.Outcome)
+perf_tree <-  performance(pred_tree, measure="tpr", x.measure="fpr")
+records[1,3]  <- unlist(performance(pred_tree, "auc")@y.values)
+
+records
+
+
+#auc .8309475
+#auc .8993044 .9,.8
+#auc .9110461 as.factor with <32 levels
+#auc .9148939 as.factor with <32 levels with NA predictions
+```
+
+
+
+
+
+
+## lda :
+```{r}
+trn.data.lda <- lda(factor(Subrogation.Outcome) ~ . , data = trn.data)
+ypred.train.lda <- predict(trn.data.lda, trn.data)$class
+ypred.test.lda <- predict(trn.data.lda, tst.data)$class
+
+records[3,1] <- calc_error_rate(ypred.train.lda, trn.data$Subrogation.Outcome)
+records[3,2] <- calc_error_rate(ypred.test.lda, tst.data$Subrogation.Outcome)
+
+prob_lda <- predict(trn.data.lda, tst.data, type="vector")$posterior[,2]
+pred_lda <- prediction(prob_lda, tst.data$Subrogation.Outcome)
+perf_lda <-  performance(pred_lda, measure="tpr", x.measure="fpr")
+records[3,3]  <- unlist(performance(pred_lda, "auc")@y.values)
+
+records
+
+```
+
+## GLM :
+```{r}
+
+Logistic.Model.Train <- glm(as.factor(Subrogation.Outcome) ~ . , family = binomial, data = trn.data_bal)  
+
+Predict.glm.train <- predict(Logistic.Model.Train, type = "response")  
+Predict.glm.test  <- predict(Logistic.Model.Train, newdata=tst.data , type = "response")
+
+Predict.glm.train <- round(Predict.glm.train, digits = 2)  
+Predict.glm.test  <- round(Predict.glm.test , digits = 2)
+
+Predict.glm.train[Predict.glm.train >  .5] <- 1
+Predict.glm.train[Predict.glm.train <= .5] <- 0
+Predict.glm.test [Predict.glm.test  >  .5] <- 1
+Predict.glm.test [Predict.glm.test  <= .5] <- 0
+
+records[4,1] <- calc_error_rate(Predict.glm.train, trn.data$Subrogation.Outcome)
+records[4,2] <- calc_error_rate(Predict.glm.test, tst.data$Subrogation.Outcome )
+
+# ROC curve for glm
+prob_glm  <- predict(Logistic.Model.Train, newdata=tst.data , type = "response")
+pred_glm  <- prediction(as.numeric(prob_glm), as.numeric(tst.data$Subrogation.Outcome))
+perf_glm  <- performance(pred_glm, measure="tpr", x.measure="fpr")
+records[4,3]  <- unlist(performance(pred_glm, "auc")@y.values)
+
+records
+#0.9235183  <100lvl impute                                                                                        
+#0.9243812(<100lvls no correlation 98, no date change, na.pass, toupper, lossdate)
+
+
+```
+
+## QDA:
+```{r}
+trn.data.qda <- qda(factor(Subrogation.Outcome) ~ . , data = trn.data)
+ypred.train.qda <- predict(trn.data.lda, trn.data)$class
+ypred.test.qda <- predict(trn.data.lda, tst.data)$class
+
+records[5,1] <- calc_error_rate(ypred.train.qda, trn.data$Subrogation.Outcome)
+records[5,2] <- calc_error_rate(ypred.test.qda, tst.data$Subrogation.Outcome)
+
+prob_lda <- predict(trn.data.lda, tst.data, type="vector")$posterior[,2]
+pred_lda <- prediction(prob_lda, tst.data$Subrogation.Outcome)
+perf_lda <-  performance(pred_lda, measure="tpr", x.measure="fpr")
+records[5,3]  <- unlist(performance(pred_lda, "auc")@y.values)
+
+records
+```
+
+## Random Forest:
+
+```{r}
+set.seed(21)
+
+trn.data_bal <- ovun.sample(Subrogation.Outcome ~ ., data = trn.data, method = "over", p= .21)$data
+prop.table(table(trn.data_bal$Subrogation.Outcome))
+trn.data_bal
+trn.data.rf <- randomForest(Subrogation.Outcome ~ . , data = trn.data_bal)
+
+
+Predict.rf.train <- predict(trn.data.rf, trn.data, type = "class")
+Predict.rf.test <- predict(trn.data.rf, tst.data, type = "class")
+
+records[6,1] <- calc_error_rate(Predict.rf.train, trn.data$Subrogation.Outcome)
+records[6,2] <- calc_error_rate(Predict.rf.test, tst.data$Subrogation.Outcome)
+
+
+prob_rf <- predict(trn.data.rf, tst.data, type="prob")
+prob_rf <- as.data.frame(prob_rf)[,1]
+
+pred_rf <- prediction(as.numeric(prob_rf), tst.data$Subrogation.Outcome)
+perf_rf <-  performance(pred_rf, measure="tpr", x.measure="fpr")
+records[6,3]  <- unlist(performance(pred_rf, "auc")@y.values)
+
+records
+
+
+
+```
+
+# Final Model 1:
+```{r}
+Model <- glm(Subrogation.Outcome ~ . , family = binomial, data = data.num)
+
+
+data3 <- mutate_all(data.predict, .funs=toupper) #Make sure all categorical data is consistant
+data3 <- as.data.frame(lapply(data3, as.factor))
+nlevels <- as.data.frame(lapply(data3, nlevels))
+data3 <- data3[, which(nlevels != 1)]
+data3 <- data3[-1]
+data3 <- as.data.frame(lapply(data3, as.factor))
+
+data3$Medical.Coverage.Amount            <- as.numeric(data.predict$Medical.Coverage.Amount)
+data3$Liability.Coverage.Amount          <- as.numeric(data.predict$Liability.Coverage.Amount)
+data3$Content.Coverage.Amount            <- as.numeric(data.predict$Content.Coverage.Amount)
+data3$Dwelling.Coverage.Amount           <- as.numeric(data.predict$Dwelling.Coverage.Amount)
+data3$Loss.of.Use.Coverage.Amount        <- as.numeric(data.predict$Loss.of.Use.Coverage.Amount)
+data3$Separate.Structure.Coverage.Amount <- as.numeric(data.predict$Separate.Structure.Coverage.Amount)
+data3$Policyholder.Age                   <- as.numeric(data.predict$Policyholder.Age)
+
+
+data3$Claim.Reported.Date <-  NULL
+data3$Policy.Description <- NULL
+data3$Content.Coverage.Amount <- NULL
+
+Dateofloss <- data3$Date.of.Loss
+Dateofloss <- as.character(as.Date(Dateofloss))
+Dateofloss[is.na(Dateofloss)] <- "NA-NA-NA"
+y <- unlist(strsplit(Dateofloss, "-"))
+y <- mapvalues(y, from = "NA" , to = NA)
+Dateofloss <-  as.data.frame(matrix(y, ncol = 3 , byrow = T))
+names(Dateofloss) <- c("Date.of.Loss.Year","Date.of.Loss.Month","Date.of.Loss.Day")
+data3$Date.of.Loss <- NULL
+data3 <- as.data.frame(cbind(data3, Dateofloss))
+
+data3 <- data3 %>% mutate_if(is.double ,funs(ifelse(is.na(.), mean(., na.rm=T), .)))
+nlevels <- as.data.frame(lapply(data3, nlevels))
+data3 <- data3[, which(nlevels <= 100)]
+
+
+data3$Cause.of.Loss <- as.factor(mapvalues(data3$Cause.of.Loss, from=c("TOTAL THEFT"),to=c("THEFT")))
+data3$Cause.of.Loss <- as.factor(mapvalues(data3$Cause.of.Loss, from=c("MISCELLANEOUS"),to=c("OTHER")))
+
+
+Prediction  <- predict(Model, newdata=data3 , type = "response")
+Prediction <- cbind(data.predict$Fake.Claim.Number,as.data.frame(Prediction))
+
+write.csv(Prediction, "Prediction.csv",row.names = F)
+
+```
+
+# Balancing data/ XGBtree:
+```{r}
+set.seed(21)
+# prop.table(table(data2$Subrogation.Outcome)) 
+#trn.data_bal <- ovun.sample(Subrogation.Outcome.1 ~ ., data = trn.data, method = "over", p= .4)$data
+
+#trn.data_bal <- ROSE(Subrogation.Outcome.1 ~ ., data = trn.data, seed = 21, p = .2)$data
+
+trn.data$Subrogation.Outcome.1 <- as.factor(ifelse(trn.data$Subrogation.Outcome.1 == 1 , 'yes' , 'no'))
+set.seed(21)
+trn.data_bal <- SMOTE(Subrogation.Outcome.1 ~ ., trn.data, perc.over = 100, perc.under = 600)
+prop.table(table(trn.data_bal$Subrogation.Outcome))
+
+
+# trn.data_bal$Subrogation.Outcome.1 <- as.factor(ifelse(trn.data_bal$Subrogation.Outcome.1 == 1 , 'yes' , 'no'))
+tst.data$Subrogation.Outcome.1 <- as.factor(ifelse(tst.data$Subrogation.Outcome.1 == 1 , 'yes' , 'no'))
+
+control <- trainControl(method = 'cv', number = 3, returnResamp = 'none', summaryFunction = twoClassSummary, classProbs = TRUE)
+
+
+
+
+set.seed(21)
+Model <-  train(trn.data_bal[,-1], # factor()
+                trn.data_bal[,1],   # numeric only
+                method ="xgbTree",
+                trControl = control,
+                metric = "ROC",
+                preProc = c("center", "scale"))
+
+
+prob_glm  <- predict(Model, newdata=tst.data , type = "prob")
+pred_glm  <- prediction(as.numeric(prob_glm$yes), as.numeric(tst.data$Subrogation.Outcome.1))
+perf_glm  <- performance(pred_glm, measure="tpr", x.measure="fpr")
+records[4,3]  <- unlist(performance(pred_glm, "auc")@y.values)
+records
+
+varImp(Model)
+```
+
+```{r}
+
+data.num$Subrogation.Outcome.1 <- as.factor(ifelse(data.num$Subrogation.Outcome.1 == 1 , 'yes' , 'no'))
+set.seed(21)
+data.num_bal <- SMOTE(Subrogation.Outcome.1 ~ ., data.num, perc.over = 100, perc.under = 600)
+prop.table(table(data.num_bal$Subrogation.Outcome))
+
+
+control <- trainControl(method = 'cv', number = 20, returnResamp = 'none', summaryFunction = twoClassSummary, classProbs = TRUE)
+
+
+
+
+set.seed(21)
+Model <-  train(trn.data_bal[,-1], # factor()
+                trn.data_bal[,1],   # numeric only
+                method ="xgbTree",
+                trControl = control,
+                metric = "ROC",
+                preProc = c("center", "scale"))
+
+
+```
+
+```{r}
+sum.Mod <- summary(Model)
+sum.Mod <- as.data.frame(sum.Mod$coefficients[,1])
+names(sum.Mod) <-  "Estimates"
+sum.Mod1 <- sum.Mod[order(sum.Mod$Estimates),] 
+
+
+neg <- head(sum.Mod1, n = 20)
+pos <- tail(sum.Mod1, n = 20)
+
+# indices of influentuial coefficents 
+inds <- as.vector(rbind(which(sum.Mod$Estimates %in% neg), which(sum.Mod$Estimates %in% pos)))  
+
+
+
+sum.Mod <- as.data.frame(cbind(coeffs = rownames(sum.Mod), estimates = sum.Mod$Estimates))
+
+sum.Mod[inds,]
+
+
+```
+
+
+More Data Analysis on Variable Importance:
+
+```{r}
+graph.data <- data
+graph.data$Date.of.Loss <-  format(as.Date(data$Date.of.Loss), "%Y-%m") # keep only year and month 
+
+ts.data <- graph.data %>% group_by(Date.of.Loss) %>% tally() # frequency of claims by date of loss
+ts1.data <- graph.data %>% group_by(Date.of.Loss) %>% tally() # frequency of 1's by date of loss
+ts1.data <- cbind(ts1.data, Percentage = ts1.data$n / ts.data$n) # percentage of 1's by date
+
+hist.data <- graph.data %>% group_by(Subrogation.Outcome) %>% tally() # frequency of 1's and 0's 
+
+state.data <- graph.data %>% group_by(Loss.Location.State) %>% tally() # freq of claims by state 
+state1.data <- graph.data %>% group_by(Loss.Location.State) %>% tally(Subrogation.Outcome) # freq of 1's by state
+state1.data <- cbind(state1.data, Percentage = state1.data$n / state.data$n) # percentage of 1's by state 
+
+
+prod.data <- graph.data %>% group_by(Product.Type) %>% tally(Subrogation.Outcome) # freq of claims by product type 
+prod1.data <- graph.data %>% group_by(Loss.Location.State) %>% tally(Subrogation.Outcome) # freq of 1's by product type 
+prod1.data <- cbind(prod1.data, Percentage = prod1.data$n / prod.data$n) # percentage of 1's by product type
+```
+
+
+
+```{r}
+
+emrp.names <- c("EMRP ONLY", "CRN.Proximate.Cause.VEHICLE", "Cause.of.Loss.VEHICLE", "Flooring.Unit", "Kitchen.Damage" , "Vendor.Engineer", "Vendor.Restoration" , "Fence.Damage", "Water.Damage.WASHING MACHINE " , "Water.Damage.DISHWASHER", "Dining.Room.Damager" ,  "Product.Type.Code.PTP", "Proximate.Cause.INADEQUATE WORKMANSHIP " , "Water.Damage.BROKEN PIPE",  "Proximate.Cause.FIRE", "Contents.Unit.Indicator", "Cause.of.Loss.WATER")
+
+emrp = matrix(NA, nrow=length(emrp.names), ncol=1)
+colnames(emrp) = c("Emrp+")
+rownames(emrp) = emrp.names
+
+# EMRP
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>%tally()
+emrp[1] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.VEHICLE  
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>%tally()
+emrp[2] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Cause.of.Loss.VEHICLE
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "VEHICLE" ) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "VEHICLE" ) %>%tally()
+emrp[3] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Flooring.Unit.Indicator
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Flooring.Unit.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Flooring.Unit.Indicator == 1) %>%tally()
+emrp[4] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Kitchen.Damage.Indicator 
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Kitchen.Damage.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Kitchen.Damage.Indicator == 1) %>%tally()
+emrp[5] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Engineer.Indicator
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Vendor...Engineer.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Vendor...Engineer.Indicator == 1) %>%tally()
+emrp[6] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Restoration...Preferred.Indicator
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>%tally()
+emrp[7] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Fence.Damage.Indicator.
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Fence.Damage.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Fence.Damage.Indicator == 1) %>%tally()
+emrp[8] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - WASHING MACHINE
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE" ) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE") %>%tally()
+emrp[9] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - DISHWASHER
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>%tally()
+emrp[10] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Dining.Room.Damage.Indicator
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Dining.Room.Damage.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Dining.Room.Damage.Indicator == 1) %>%tally()
+emrp[11] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Product.Type..Code.PTP 
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Product.Type.Code == "PTP") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Product.Type.Code == "PTP") %>%tally()
+emrp[12] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FAULTY-INADEQUATE WORKMANSHIP 
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>%tally()
+emrp[13] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.BROKEN PIPE 
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>%tally()
+emrp[14] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FIRE 
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FIRE") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FIRE") %>%tally()
+emrp[15] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Contents.Unit.Indicator
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Contents.Unit.Indicator == 1) %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Contents.Unit.Indicator == 1) %>%tally()
+emrp[16] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+# Cause.of.Loss.WATER
+emrp_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+emrp_props.all <- data2 %>% filter(EMRP.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+emrp[17] <- paste(round((emrp_props.1/emrp_props.all)*100, 2),"%" , sep="")
+
+
+
+emrp <- as.data.frame(emrp, quote = F) 
+
+```
+
+```{r}
+
+ALE.names <- c("ALE ONLY", "CRN.Proximate.Cause.VEHICLE", "Cause.of.Loss.VEHICLE", "Flooring.Unit", "Kitchen.Damage" , "Vendor.Engineer", "Vendor.Restoration" , "Fence.Damage", "Water.Damage.WASHING MACHINE " , "Water.Damage.DISHWASHER", "Dining.Room.Damager" ,  "Product.Type.Code.PTP", "Proximate.Cause.INADEQUATE WORKMANSHIP " , "Water.Damage.BROKEN PIPE",  "Proximate.Cause.FIRE", "Contents.Unit.Indicator", "Cause.of.Loss.WATER")
+
+ALE = matrix(NA, nrow=length(ALE.names), ncol=1)
+colnames(ALE) = c("ALE+")
+rownames(ALE) = ALE.names
+
+# ALE
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>%tally()
+ALE[1] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.VEHICLE  
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>%tally()
+ALE[2] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Cause.of.Loss.VEHICLE
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "VEHICLE" ) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "VEHICLE" ) %>%tally()
+ALE[3] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Flooring.Unit.Indicator
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Flooring.Unit.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Flooring.Unit.Indicator == 1) %>%tally()
+ALE[4] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Kitchen.Damage.Indicator 
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Kitchen.Damage.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Kitchen.Damage.Indicator == 1) %>%tally()
+ALE[5] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Engineer.Indicator
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Vendor...Engineer.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Vendor...Engineer.Indicator == 1) %>%tally()
+ALE[6] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Restoration...Preferred.Indicator
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>%tally()
+ALE[7] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Fence.Damage.Indicator.
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Fence.Damage.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Fence.Damage.Indicator == 1) %>%tally()
+ALE[8] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - WASHING MACHINE
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE" ) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE") %>%tally()
+ALE[9] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - DISHWASHER
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>%tally()
+ALE[10] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Dining.Room.Damage.Indicator
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Dining.Room.Damage.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Dining.Room.Damage.Indicator == 1) %>%tally()
+ALE[11] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Product.Type..Code.PTP 
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Product.Type.Code == "PTP") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Product.Type.Code == "PTP") %>%tally()
+ALE[12] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FAULTY-INADEQUATE WORKMANSHIP 
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>%tally()
+ALE[13] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.BROKEN PIPE 
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>%tally()
+ALE[14] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FIRE 
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FIRE") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(CRN.Proximate.Cause == "FIRE") %>%tally()
+ALE[15] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Contents.Unit.Indicator
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Contents.Unit.Indicator == 1) %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Contents.Unit.Indicator == 1) %>%tally()
+ALE[16] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+# Cause.of.Loss.WATER
+ALE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+ALE_props.all <- data2 %>% filter(ALE.Unit.Indicator == "1") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+ALE[17] <- paste(round((ALE_props.1/ALE_props.all)*100, 2),"%" , sep="")
+
+
+
+ALE <- as.data.frame(ALE, quote = F)
+```
+
+
+
+```{r}
+VEHICLE.names <- c("VEHICLE ONLY", "CRN.Proximate.Cause.VEHICLE", "Cause.of.Loss.VEHICLE", "Flooring.Unit", "Kitchen.Damage" , "Vendor.Engineer", "Vendor.Restoration" , "Fence.Damage", "Water.Damage.WASHING MACHINE " , "Water.Damage.DISHWASHER", "Dining.Room.Damager" ,  "Product.Type.Code.PTP", "Proximate.Cause.INADEQUATE WORKMANSHIP " , "Water.Damage.BROKEN PIPE",  "Proximate.Cause.FIRE", "Contents.Unit.Indicator", "Cause.of.Loss.WATER")
+
+VEHICLE = matrix(NA, nrow=length(VEHICLE.names), ncol=1)
+colnames(VEHICLE) = c("VEHICLE+")
+rownames(VEHICLE) = VEHICLE.names
+
+# VEHICLE
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>%tally()
+VEHICLE[1] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+
+# Flooring.Unit.Indicator
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Flooring.Unit.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Flooring.Unit.Indicator == 1) %>%tally()
+VEHICLE[4] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Kitchen.Damage.Indicator 
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Kitchen.Damage.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Kitchen.Damage.Indicator == 1) %>%tally()
+VEHICLE[5] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Engineer.Indicator
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Vendor...Engineer.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Vendor...Engineer.Indicator == 1) %>%tally()
+VEHICLE[6] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Vendor...Restoration...Preferred.Indicator
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Vendor...Restoration...Preferred.Indicator == 1) %>%tally()
+VEHICLE[7] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Fence.Damage.Indicator.
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Fence.Damage.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Fence.Damage.Indicator == 1) %>%tally()
+VEHICLE[8] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - WASHING MACHINE
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE" ) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "APPLIANCE - WASHING MACHINE") %>%tally()
+VEHICLE[9] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.APPLIANCE - DISHWASHER
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "APPLIANCE - DISHWASHER" ) %>%tally()
+VEHICLE[10] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Dining.Room.Damage.Indicator
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Dining.Room.Damage.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Dining.Room.Damage.Indicator == 1) %>%tally()
+VEHICLE[11] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Product.Type..Code.PTP 
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Product.Type.Code == "PTP") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Product.Type.Code == "PTP") %>%tally()
+VEHICLE[12] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FAULTY-INADEQUATE WORKMANSHIP 
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(CRN.Proximate.Cause == "FAULTY-INADEQUATE WORKMANSHIP") %>%tally()
+VEHICLE[13] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Water.Damage.Source.BROKEN PIPE 
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Water.Damage.Source == "BROKEN PIPE") %>%tally()
+VEHICLE[14] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# CRN.Proximate.Cause.FIRE 
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(CRN.Proximate.Cause == "FIRE") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(CRN.Proximate.Cause == "FIRE") %>%tally()
+VEHICLE[15] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Contents.Unit.Indicator
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Contents.Unit.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Contents.Unit.Indicator == 1) %>%tally()
+VEHICLE[16] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+# Cause.of.Loss.WATER
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(Cause.of.Loss == "WATER") %>% tally()
+VEHICLE[17] <- paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+
+
+VEHICLE <- as.data.frame(VEHICLE, quote = F)
+```
+
+
+
+```{r}
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(ALE.Unit.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(ALE.Unit.Indicator == 1) %>% tally()
+paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(EMRP.Unit.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(CRN.Proximate.Cause == "VEHICLE") %>% filter(EMRP.Unit.Indicator == 1) %>% tally()
+paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+VEHICLE_props.1 <- data2 %>% filter(Subrogation.Outcome == "1") %>% filter(ALE.Unit.Indicator == 1) %>% filter(EMRP.Unit.Indicator == 1) %>% tally()
+VEHICLE_props.all <- data2 %>% filter(ALE.Unit.Indicator == 1) %>% filter(EMRP.Unit.Indicator == 1) %>% tally()
+paste(round((VEHICLE_props.1/VEHICLE_props.all)*100, 2),"%" , sep="")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
